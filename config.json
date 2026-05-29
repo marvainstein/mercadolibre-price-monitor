@@ -1,0 +1,10 @@
+{
+  "PRODUCT_URL": "https://www.mercadolibre.com.ar/smartwatch-reloj-forerunner-165-garmin-amoled-tactil-botones/p/MLA34229153?pdp_filters=item_id%3AMLA1421023817&matt_tool=89488245#origin=share&sid=share&wid=MLA1421023817&action=copy",
+  "EMAIL_SENDER": "your_email@gmail.com",
+  "EMAIL_PASSWORD": "your_16_char_app_password",
+  "EMAIL_RECIPIENT": "martinvainstein@outlook.com",
+  "SCAN_INTERVAL": 4,
+  "PRICE_HISTORY_FILE": "price_history.json",
+  "HEADLESS": true,
+  "TIMEOUT": 30000
+}
