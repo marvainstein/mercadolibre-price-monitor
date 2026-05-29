@@ -1,10 +1,8 @@
 """
-Mercadolibre Price Monitor - Production Ready
-Monitors product prices and sends email alerts when prices change.
-Uses Playwright for realistic headless browsing.
+Mercadolibre Price Monitor - Simplified Version
+Uses requests + BeautifulSoup instead of Playwright for better macOS compatibility
 """
 
-import asyncio
 import json
 import smtplib
 import schedule
@@ -14,7 +12,8 @@ from datetime import datetime
 from pathlib import Path
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from playwright.async_api import async_playwright
+import requests
+from bs4 import BeautifulSoup
 import logging
 
 # Configure logging
@@ -82,179 +81,128 @@ class PriceMonitor:
         except IOError as e:
             logger.error(f"Could not save price history: {e}")
     
-    async def extract_price_from_page(self, page):
-        """Extract 'Mejor precio en cuotas' price from Mercadolibre page."""
+    def fetch_current_price(self):
+        """Fetch current price using requests + BeautifulSoup (more reliable on macOS)."""
         try:
-            await page.wait_for_load_state('networkidle', timeout=self.config.get('TIMEOUT', 30000))
-            await asyncio.sleep(2)
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'es-AR,es;q=0.9',
+                'Referer': 'https://www.mercadolibre.com.ar'
+            }
             
-            # Method 1: Extract installment price
-            price_data = await self._extract_installment_price(page)
+            logger.info(f"🌐 Fetching: {self.config['PRODUCT_URL'][:80]}...")
             
-            # Method 2: Fallback to alternative methods
-            if not price_data:
-                logger.warning("Installment price not found, trying alternative methods...")
-                price_data = await self._extract_alternative_price(page)
+            # Add timeout
+            timeout = self.config.get('TIMEOUT', 30000) / 1000  # Convert ms to seconds
+            response = requests.get(self.config['PRODUCT_URL'], headers=headers, timeout=timeout)
+            response.raise_for_status()
+            
+            # Parse HTML
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            # Try to extract price from "Mejor precio en cuotas"
+            price_data = self._extract_price_from_html(soup)
             
             if price_data:
                 price_data['timestamp'] = datetime.now().isoformat()
-            
-            return price_data
-            
-        except Exception as e:
-            logger.error(f"Error extracting price: {e}")
-            return {}
-    
-    async def _extract_installment_price(self, page):
-        """Extract price from 'Mejor precio en cuotas' section."""
-        try:
-            price_info = await page.evaluate("""
-                () => {
-                    const elements = Array.from(document.querySelectorAll('*'));
-                    const cuotasElement = elements.find(el => 
-                        el.textContent.includes('Mejor precio en cuotas')
-                    );
-                    
-                    if (cuotasElement) {
-                        const text = cuotasElement.textContent;
-                        const match = text.match(/\$[\d.,]+/);
-                        
-                        if (match) {
-                            return {
-                                price: match[0],
-                                full_text: text,
-                                found: true
-                            };
-                        }
-                    }
-                    
-                    return { found: false };
-                }
-            """)
-            
-            if price_info.get('found'):
-                price_str = price_info['price'].replace('$', '').replace('.', '').replace(',', '.')
-                try:
-                    return {
-                        'price': float(price_str),
-                        'currency': 'ARS',
-                        'raw_text': price_info.get('full_text', ''),
-                        'source': 'installments'
-                    }
-                except ValueError:
-                    logger.error(f"Could not parse price: {price_str}")
-                    return {}
-            
-            return {}
-            
-        except Exception as e:
-            logger.error(f"Error in installment price extraction: {e}")
-            return {}
-    
-    async def _extract_alternative_price(self, page):
-        """Extract price using alternative selectors."""
-        try:
-            price_info = await page.evaluate("""
-                () => {
-                    let price = null;
-                    let found = false;
-                    
-                    // Try multiple selector strategies
-                    const selectors = [
-                        'span[class*="price"]',
-                        'div[class*="price"]',
-                        '[data-testid*="PRICE"]',
-                        '[class*="ui-pdp-price"]'
-                    ];
-                    
-                    for (let selector of selectors) {
-                        const elements = document.querySelectorAll(selector);
-                        for (let el of elements) {
-                            const text = el.textContent;
-                            const match = text.match(/\$[\d.,]+/);
-                            if (match) {
-                                price = match[0];
-                                found = true;
-                                break;
-                            }
-                        }
-                        if (found) break;
-                    }
-                    
-                    // Try meta tags
-                    if (!found) {
-                        const metaPrice = document.querySelector('meta[itemprop="price"]');
-                        if (metaPrice) {
-                            price = metaPrice.getAttribute('content');
-                            found = true;
-                        }
-                    }
-                    
-                    return { price, found };
-                }
-            """)
-            
-            if price_info['found'] and price_info['price']:
-                price_str = price_info['price'].replace('$', '').replace('.', '').replace(',', '.')
-                try:
-                    return {
-                        'price': float(price_str),
-                        'currency': 'ARS',
-                        'source': 'alternative'
-                    }
-                except ValueError:
-                    return {}
-            
-            return {}
-            
-        except Exception as e:
-            logger.error(f"Error in alternative price extraction: {e}")
-            return {}
-    
-    async def fetch_current_price(self):
-        """Fetch current price using Playwright with realistic user simulation."""
-        async with async_playwright() as p:
-            try:
-                browser = await p.chromium.launch(
-                    headless=self.config.get('HEADLESS', True),
-                    args=[
-                        '--disable-blink-features=AutomationControlled',
-                    ]
-                )
-                
-                context = await browser.new_context(
-                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-                    locale='es-AR',
-                    timezone_id='America/Argentina/Buenos_Aires',
-                    viewport={'width': 1920, 'height': 1080}
-                )
-                
-                page = await context.new_page()
-                
-                # Set realistic headers
-                await page.set_extra_http_headers({
-                    'Accept-Language': 'es-AR,es;q=0.9',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                    'Referer': 'https://www.mercadolibre.com.ar'
-                })
-                
-                logger.info(f"🌐 Fetching: {self.config['PRODUCT_URL'][:80]}...")
-                
-                try:
-                    await page.goto(self.config['PRODUCT_URL'], wait_until='networkidle', timeout=60000)
-                    price_data = await self.extract_price_from_page(page)
-                except asyncio.TimeoutError:
-                    logger.warning("Page load timeout, extracting available data...")
-                    price_data = await self.extract_price_from_page(page)
-                finally:
-                    await context.close()
-                    await browser.close()
-                
                 return price_data
-                
-            except Exception as e:
-                logger.error(f"❌ Error fetching price: {e}")
-                raise
+            else:
+                logger.warning("❌ Could not extract price from HTML")
+                return {}
+            
+        except requests.Timeout:
+            logger.error(f"❌ Request timeout after {timeout} seconds")
+            return {}
+        except requests.ConnectionError as e:
+            logger.error(f"❌ Connection error: {e}")
+            return {}
+        except Exception as e:
+            logger.error(f"❌ Error fetching price: {e}")
+            return {}
+    
+    def _extract_price_from_html(self, soup):
+        """Extract price from HTML."""
+        try:
+            # Method 1: Look for text containing "Mejor precio en cuotas"
+            text_content = soup.get_text()
+            
+            if 'Mejor precio en cuotas' in text_content:
+                # Find price near this text
+                lines = text_content.split('\n')
+                for i, line in enumerate(lines):
+                    if 'Mejor precio en cuotas' in line:
+                        # Look at next lines for price
+                        for j in range(i, min(i+10, len(lines))):
+                            price_str = self._extract_price_string(lines[j])
+                            if price_str:
+                                try:
+                                    price = float(price_str)
+                                    return {
+                                        'price': price,
+                                        'currency': 'ARS',
+                                        'source': 'installments'
+                                    }
+                                except ValueError:
+                                    continue
+            
+            # Method 2: Look for price patterns in the entire page
+            import re
+            price_pattern = r'\$[\s]*[\d.,]+'
+            matches = re.findall(price_pattern, text_content)
+            
+            if matches:
+                # Get the first significant price (likely the product price)
+                for match in matches:
+                    price_str = self._extract_price_string(match)
+                    if price_str and float(price_str) > 10000:  # Reasonable product price
+                        try:
+                            price = float(price_str)
+                            return {
+                                'price': price,
+                                'currency': 'ARS',
+                                'source': 'alternative'
+                            }
+                        except ValueError:
+                            continue
+            
+            return {}
+        
+        except Exception as e:
+            logger.error(f"Error extracting price from HTML: {e}")
+            return {}
+    
+    def _extract_price_string(self, text):
+        """Extract numeric price from text."""
+        import re
+        # Remove $ and spaces, replace dots with nothing, comma with dot
+        text = text.replace('$', '').strip()
+        # Match digits with optional thousands separator
+        match = re.search(r'[\d.]+(?:,\d+)?', text)
+        if match:
+            price_str = match.group()
+            # Handle both European (1.000,50) and US (1,000.50) formats
+            if ',' in price_str and '.' in price_str:
+                if price_str.index(',') > price_str.index('.'):
+                    # US format: 1,000.50
+                    price_str = price_str.replace(',', '')
+                else:
+                    # European format: 1.000,50
+                    price_str = price_str.replace('.', '').replace(',', '.')
+            elif ',' in price_str:
+                # Could be thousands or decimal
+                if price_str.count(',') == 1 and len(price_str.split(',')[1]) == 2:
+                    # Likely decimal: 1000,50
+                    price_str = price_str.replace(',', '.')
+                else:
+                    # Likely thousands: remove it
+                    price_str = price_str.replace(',', '')
+            
+            try:
+                return str(float(price_str))
+            except ValueError:
+                return None
+        return None
     
     def send_email_alert(self, previous_price, current_price, change_type):
         """Send email alert about price change."""
@@ -332,14 +280,14 @@ class PriceMonitor:
             logger.error(f"❌ Error sending email: {e}")
             return False
     
-    async def check_price(self):
+    def check_price(self):
         """Check current price and send alert if changed."""
         try:
             logger.info("=" * 60)
             logger.info("🔍 INICIANDO VERIFICACIÓN DE PRECIO")
             logger.info("=" * 60)
             
-            current_price_data = await self.fetch_current_price()
+            current_price_data = self.fetch_current_price()
             
             if not current_price_data or not current_price_data.get('price'):
                 logger.error("❌ No se pudo extraer el precio de la página")
@@ -388,9 +336,7 @@ class PriceMonitor:
         """Start the price monitoring scheduler."""
         interval_hours = self.config.get('SCAN_INTERVAL', 4)
         
-        schedule.every(interval_hours).hours.do(
-            lambda: asyncio.run(self.check_price())
-        )
+        schedule.every(interval_hours).hours.do(self.check_price)
         
         logger.info("\n" + "=" * 60)
         logger.info("🚀 MONITOR DE PRECIOS INICIADO")
@@ -412,7 +358,7 @@ def main():
         
         # Run first check immediately
         logger.info("\n🔄 Ejecutando verificación inicial...\n")
-        asyncio.run(monitor.check_price())
+        monitor.check_price()
         
         # Start scheduler
         monitor.start_scheduler()
